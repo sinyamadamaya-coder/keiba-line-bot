@@ -30,7 +30,7 @@ def get_today_race_ids(date_str=None):
     if not date_str:
         date_str = datetime.now().strftime("%Y%m%d")
     url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -41,37 +41,46 @@ def get_today_race_ids(date_str=None):
         ]))
         return race_ids
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"レース一覧取得エラー: {e}")
         return []
 
 def scrape_good_horses(race_id):
     url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
         good_horses = []
-        full_text = soup.get_text(separator='\n')
-        lines = [l.strip() for l in full_text.split('\n') if l.strip()]
-        for i, line in enumerate(lines):
-            if line in ['A', 'B']:
-                context = lines[max(0,i-6):i]
-                horse_name = None
-                comment = ""
-                for j, ctx in enumerate(reversed(context)):
-                    if re.match(r'^[\u30A0-\u30FF\u4E00-\u9FFF\u3040-\u309FA-Za-z]{2,12}$', ctx):
-                        horse_name = ctx
-                        remaining = context[len(context)-j:]
-                        for r in remaining:
-                            if r != '前走' and len(r) > 1 and not r.isdigit():
-                                comment = r
-                                break
-                        break
-                if horse_name:
-                    good_horses.append({"name": horse_name, "comment": comment, "grade": line})
+        # tr要素で各行をパース
+        rows = soup.find_all("tr")
+        for row in rows:
+            cells = row.get_text(separator="\t").split("\t")
+            cells = [c.strip() for c in cells if c.strip()]
+            # 行の中にA/B評価があるか確認
+            grade = None
+            for c in cells:
+                if c in ["A", "B"]:
+                    grade = c
+                    break
+            if not grade:
+                continue
+            # 馬名を探す（カタカナ2文字以上）
+            horse_name = None
+            comment = ""
+            for i, c in enumerate(cells):
+                if re.match(r'^[\u30A0-\u30FF]{2,}$', c):
+                    horse_name = c
+                    # 馬名の後の短評を取得
+                    for j in range(i+1, len(cells)):
+                        if cells[j] not in ["A","B","C","D","前走"] and len(cells[j]) > 1 and not cells[j].isdigit():
+                            comment = cells[j]
+                            break
+                    break
+            if horse_name:
+                good_horses.append({"name": horse_name, "comment": comment, "grade": grade})
         return good_horses
     except Exception as e:
-        print(f"Error {race_id}: {e}")
+        print(f"スクレイピングエラー {race_id}: {e}")
         return []
 
 def build_line_message(date_str=None):
