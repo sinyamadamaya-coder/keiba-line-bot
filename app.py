@@ -26,29 +26,35 @@ PLACE_MAP = {
     "09": "阪神", "10": "小倉"
 }
 
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Referer": "https://race.netkeiba.com/",
+})
+
 def get_today_race_ids(date_str=None):
     if not date_str:
         date_str = datetime.now().strftime("%Y%m%d")
     url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = session.get(url, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
-        links = soup.find_all("a", href=re.compile(r"race_id=\d+"))
+        links = soup.find_all("a", href=re.compile(r"race_id=\\d+"))
         race_ids = list(dict.fromkeys([
-            re.search(r"race_id=(\d+)", a["href"]).group(1)
-            for a in links if re.search(r"race_id=(\d+)", a["href"])
+            re.search(r"race_id=(\\d+)", a["href"]).group(1)
+            for a in links if re.search(r"race_id=(\\d+)", a["href"])
         ]))
         return race_ids
     except Exception as e:
-        print(f"レース一覧取得エラー: {e}")
+        print(f"Error: {e}")
         return []
 
 def scrape_good_horses(race_id):
     url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = session.get(url, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
         good_horses = []
         rows = soup.find_all("tr")
@@ -56,38 +62,32 @@ def scrape_good_horses(race_id):
             cells = row.find_all("td")
             if not cells:
                 continue
-            # 各セルのテキストを取得（改行で分割して最初の要素を使う）
-            cell_texts = []
-            for c in cells:
-                t = c.get_text(strip=True)
-                # 改行が含まれる場合、最初の行（馬名部分）を取得
-                first_line = t.split("\n")[0].strip()
-                cell_texts.append(first_line)
-            # A/B評価があるか確認
+            cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
             grade = None
             for t in cell_texts:
-                if t in ["A", "B"]:
-                    grade = t
+                if t.strip() in ["A", "B"]:
+                    grade = t.strip()
                     break
             if not grade:
                 continue
-            # カタカナを含む馬名セルを探す
             horse_name = None
             comment = ""
             for i, t in enumerate(cell_texts):
-                if re.search(r'[\u30A0-\u30FF]{2,}', t):
-                    horse_name = t
-                    # 次のセルが短評
-                    if i + 1 < len(cell_texts):
-                        nxt = cell_texts[i + 1]
-                        if nxt not in ["A","B","C","D","前走",""] and not nxt.isdigit():
+                clean = re.sub(r'\\s+', '', t)
+                m = re.search(r'([\\u30A0-\\u30FF\\u30FC]+)', clean)
+                if m and len(m.group(1)) >= 2:
+                    horse_name = m.group(1)
+                    for j in range(i+1, len(cell_texts)):
+                        nxt = cell_texts[j].strip()
+                        if nxt and nxt not in ["A","B","C","D","前走","--"] and not nxt.isdigit() and len(nxt) > 1:
                             comment = nxt
+                            break
                     break
             if horse_name:
                 good_horses.append({"name": horse_name, "comment": comment, "grade": grade})
         return good_horses
     except Exception as e:
-        print(f"スクレイピングエラー {race_id}: {e}")
+        print(f"Error {race_id}: {e}")
         return []
 
 def build_line_message(date_str=None):
@@ -142,12 +142,12 @@ def handle_message(event):
     user_text = event.message.text.strip()
     if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
         reply_text = build_line_message()
-    elif re.match(r'^\d{8}$', user_text):
+    elif re.match(r'^\\d{8}$', user_text):
         reply_text = build_line_message(user_text)
     elif user_text in ["ヘルプ", "help", "使い方"]:
-        reply_text = "🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。\n\n日付指定: 20260315 のように8桁の日付も使えます。"
+        reply_text = "🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。"
     else:
-        reply_text = "「今日」と送ると調教評価レポートをお届けします 🏇\n「ヘルプ」で使い方を確認できます。"
+        reply_text = "「今日」と送ると調教評価レポートをお届けします 🏇"
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
@@ -160,6 +160,23 @@ def handle_message(event):
 @app.route("/", methods=["GET"])
 def health():
     return "🏇 Keiba LINE Bot is running!"
+
+@app.route("/debug/<race_id>", methods=["GET"])
+def debug(race_id):
+    url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
+    try:
+        res = session.get(url, timeout=15)
+        soup = BeautifulSoup(res.text, "html.parser")
+        rows = soup.find_all("tr")
+        result = f"status={res.status_code} tr_count={len(rows)}\n\n"
+        for i, row in enumerate(rows[:20]):
+            cells = row.find_all("td")
+            if cells:
+                texts = [c.get_text(separator=" ", strip=True)[:25] for c in cells[:6]]
+                result += f"row{i}: {texts}\n"
+        return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception as e:
+        return f"Error: {e}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
