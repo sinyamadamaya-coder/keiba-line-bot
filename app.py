@@ -36,7 +36,6 @@ session.headers.update({
 
 def fetch_soup(url):
     res = session.get(url, timeout=15)
-    # EUC-JPで明示的にデコード
     html = res.content.decode("euc-jp", errors="replace")
     return BeautifulSoup(html, "html.parser")
 
@@ -46,10 +45,10 @@ def get_today_race_ids(date_str=None):
     url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
     try:
         soup = fetch_soup(url)
-        links = soup.find_all("a", href=re.compile(r"race_id=\\d+"))
+        links = soup.find_all("a", href=re.compile(r"race_id=\d+"))
         race_ids = list(dict.fromkeys([
-            re.search(r"race_id=(\\d+)", a["href"]).group(1)
-            for a in links if re.search(r"race_id=(\\d+)", a["href"])
+            re.search(r"race_id=(\d+)", a["href"]).group(1)
+            for a in links if re.search(r"race_id=(\d+)", a["href"])
         ]))
         return race_ids
     except Exception as e:
@@ -64,9 +63,11 @@ def scrape_good_horses(race_id):
         rows = soup.find_all("tr")
         for row in rows:
             cells = row.find_all("td")
-            if not cells:
+            if len(cells) < 4:
                 continue
+            # 各セルのテキストを取得
             cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
+            # A/B評価を探す（単独のセルのみ）
             grade = None
             for t in cell_texts:
                 if t.strip() in ["A", "B"]:
@@ -74,19 +75,23 @@ def scrape_good_horses(race_id):
                     break
             if not grade:
                 continue
+            # 馬名セルを探す（4番目のセル: 「馬名 前走」形式）
+            # インデックス3が馬名セル
             horse_name = None
             comment = ""
-            for i, t in enumerate(cell_texts):
-                clean = re.sub(r'\\s+', '', t)
-                m = re.search(r'([\\u30A0-\\u30FF\\u30FC]+)', clean)
-                if m and len(m.group(1)) >= 2:
-                    horse_name = m.group(1)
-                    for j in range(i+1, len(cell_texts)):
-                        nxt = cell_texts[j].strip()
-                        if nxt and nxt not in ["A","B","C","D","前走","--"] and not nxt.isdigit() and len(nxt) > 1:
-                            comment = nxt
-                            break
-                    break
+            if len(cells) >= 4:
+                # 馬名セルのテキストから「前走」を除去してカタカナ部分を取得
+                name_cell = cell_texts[3]
+                # 「前走」より前の部分だけ使う
+                name_part = name_cell.split("前走")[0].strip()
+                # スペースで区切られていることがあるので最初のトークンを使う
+                name_part = name_part.split()[0] if name_part.split() else ""
+                # カタカナ2文字以上か確認
+                if re.search(r'[\u30A0-\u30FF]{2,}', name_part):
+                    horse_name = name_part
+                    # 短評は5番目のセル（インデックス4）
+                    if len(cells) >= 5:
+                        comment = cell_texts[4].strip()
             if horse_name:
                 good_horses.append({"name": horse_name, "comment": comment, "grade": grade})
         return good_horses
@@ -146,7 +151,7 @@ def handle_message(event):
     user_text = event.message.text.strip()
     if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
         reply_text = build_line_message()
-    elif re.match(r'^\\d{8}$', user_text):
+    elif re.match(r'^\d{8}$', user_text):
         reply_text = build_line_message(user_text)
     elif user_text in ["ヘルプ", "help", "使い方"]:
         reply_text = "🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。"
@@ -167,20 +172,11 @@ def health():
 
 @app.route("/debug/<race_id>", methods=["GET"])
 def debug(race_id):
-    url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
     try:
-        soup = fetch_soup(url)
-        rows = soup.find_all("tr")
-        result = f"tr_count={len(rows)}\n\n"
-        for i, row in enumerate(rows[:20]):
-            cells = row.find_all("td")
-            if cells:
-                texts = [c.get_text(separator=" ", strip=True)[:20] for c in cells[:6]]
-                result += f"row{i}: {texts}\n"
         horses = scrape_good_horses(race_id)
-        result += f"\n--- B以上の馬 ({len(horses)}頭) ---\n"
+        result = f"B以上の馬 ({len(horses)}頭)\n\n"
         for h in horses:
-            result += f"{h}\n"
+            result += f"{h['grade']} {h['name']} ({h['comment']})\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
