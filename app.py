@@ -65,9 +65,7 @@ def scrape_good_horses(race_id):
             cells = row.find_all("td")
             if len(cells) < 4:
                 continue
-            # 各セルのテキストを取得
             cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
-            # A/B評価を探す（単独のセルのみ）
             grade = None
             for t in cell_texts:
                 if t.strip() in ["A", "B"]:
@@ -75,21 +73,14 @@ def scrape_good_horses(race_id):
                     break
             if not grade:
                 continue
-            # 馬名セルを探す（4番目のセル: 「馬名 前走」形式）
-            # インデックス3が馬名セル
             horse_name = None
             comment = ""
             if len(cells) >= 4:
-                # 馬名セルのテキストから「前走」を除去してカタカナ部分を取得
                 name_cell = cell_texts[3]
-                # 「前走」より前の部分だけ使う
                 name_part = name_cell.split("前走")[0].strip()
-                # スペースで区切られていることがあるので最初のトークンを使う
                 name_part = name_part.split()[0] if name_part.split() else ""
-                # カタカナ2文字以上か確認
                 if re.search(r'[\u30A0-\u30FF]{2,}', name_part):
                     horse_name = name_part
-                    # 短評は5番目のセル（インデックス4）
                     if len(cells) >= 5:
                         comment = cell_texts[4].strip()
             if horse_name:
@@ -99,15 +90,16 @@ def scrape_good_horses(race_id):
         print(f"Error {race_id}: {e}")
         return []
 
-def build_line_message(date_str=None):
+def build_line_messages(date_str=None):
+    """LINEに送る複数メッセージのリストを返す（各5000文字以内、最大5件）"""
     if not date_str:
         date_str = datetime.now().strftime("%Y%m%d")
     date_display = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
     race_ids = get_today_race_ids(date_str)
     if not race_ids:
-        return f"📭 {date_display} のレース情報が見つかりませんでした。"
-    msg_lines = [f"🏇 {date_display} 調教評価レポート（B以上）\n"]
-    found_any = False
+        return [f"📭 {date_display} のレース情報が見つかりませんでした。"]
+
+    # 場ごとにまとめる
     place_groups = {}
     for race_id in race_ids:
         place_code = race_id[4:6]
@@ -115,26 +107,42 @@ def build_line_message(date_str=None):
         if place_name not in place_groups:
             place_groups[place_name] = []
         place_groups[place_name].append(race_id)
+
+    # 各場のB以上馬を収集
+    place_results = []
     for place_name, ids in place_groups.items():
-        place_lines = [f"【{place_name}】"]
-        place_found = False
+        lines = []
+        found = False
         for race_id in sorted(ids):
             race_num = int(race_id[10:12])
             horses = scrape_good_horses(race_id)
             if horses:
-                found_any = True
-                place_found = True
-                place_lines.append(f"\n{race_num}R")
+                found = True
+                lines.append(f"{race_num}R")
                 for h in horses:
                     emoji = "⭐" if h["grade"] == "A" else "✅"
                     comment = f"({h['comment']})" if h['comment'] else ""
-                    place_lines.append(f"  {emoji}{h['grade']} {h['name']} {comment}")
-        if place_found:
-            msg_lines.append("\n".join(place_lines))
-    if not found_any:
-        msg_lines.append("本日はB評価以上の馬が見当たりませんでした。")
-    msg_lines.append(f"\n🔗 https://race.netkeiba.com/top/race_list.html?kaisai_date={date_str}")
-    return "\n".join(msg_lines)
+                    lines.append(f"  {emoji}{h['grade']} {h['name']} {comment}")
+        if found:
+            place_results.append(f"【{place_name}】\n" + "\n".join(lines))
+
+    if not place_results:
+        return [f"🏇 {date_display}\n本日はB評価以上の馬が見当たりませんでした。"]
+
+    # メッセージを5000文字以内に分割（最大5メッセージ）
+    header = f"🏇 {date_display} 調教評価（B以上）"
+    messages = []
+    current = header
+    for block in place_results:
+        if len(current) + len(block) + 2 > 4800:
+            messages.append(current)
+            current = block
+        else:
+            current += "\n\n" + block
+    messages.append(current)
+
+    # LINEは1返信最大5メッセージ
+    return messages[:5]
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -150,19 +158,21 @@ def callback():
 def handle_message(event):
     user_text = event.message.text.strip()
     if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
-        reply_text = build_line_message()
+        messages = build_line_messages()
     elif re.match(r'^\d{8}$', user_text):
-        reply_text = build_line_message(user_text)
+        messages = build_line_messages(user_text)
     elif user_text in ["ヘルプ", "help", "使い方"]:
-        reply_text = "🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。"
+        messages = ["🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。\n\n日付指定: 20260315 のように8桁の日付も使えます。"]
     else:
-        reply_text = "「今日」と送ると調教評価レポートをお届けします 🏇"
+        messages = ["「今日」と送ると調教評価レポートをお届けします 🏇"]
+
+    text_messages = [TextMessage(text=m) for m in messages]
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+                messages=text_messages
             )
         )
 
