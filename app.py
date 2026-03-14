@@ -34,13 +34,18 @@ session.headers.update({
     "Referer": "https://race.netkeiba.com/",
 })
 
+def fetch_soup(url):
+    res = session.get(url, timeout=15)
+    # EUC-JPで明示的にデコード
+    html = res.content.decode("euc-jp", errors="replace")
+    return BeautifulSoup(html, "html.parser")
+
 def get_today_race_ids(date_str=None):
     if not date_str:
         date_str = datetime.now().strftime("%Y%m%d")
     url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
     try:
-        res = session.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
+        soup = fetch_soup(url)
         links = soup.find_all("a", href=re.compile(r"race_id=\\d+"))
         race_ids = list(dict.fromkeys([
             re.search(r"race_id=(\\d+)", a["href"]).group(1)
@@ -54,8 +59,7 @@ def get_today_race_ids(date_str=None):
 def scrape_good_horses(race_id):
     url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
     try:
-        res = session.get(url, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
+        soup = fetch_soup(url)
         good_horses = []
         rows = soup.find_all("tr")
         for row in rows:
@@ -165,15 +169,18 @@ def health():
 def debug(race_id):
     url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
     try:
-        res = session.get(url, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
+        soup = fetch_soup(url)
         rows = soup.find_all("tr")
-        result = f"status={res.status_code} tr_count={len(rows)}\n\n"
+        result = f"tr_count={len(rows)}\n\n"
         for i, row in enumerate(rows[:20]):
             cells = row.find_all("td")
             if cells:
-                texts = [c.get_text(separator=" ", strip=True)[:25] for c in cells[:6]]
+                texts = [c.get_text(separator=" ", strip=True)[:20] for c in cells[:6]]
                 result += f"row{i}: {texts}\n"
+        horses = scrape_good_horses(race_id)
+        result += f"\n--- B以上の馬 ({len(horses)}頭) ---\n"
+        for h in horses:
+            result += f"{h}\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
