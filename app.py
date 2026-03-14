@@ -56,6 +56,7 @@ def get_today_race_ids(date_str=None):
         return []
 
 def scrape_good_horses(race_id):
+    """A評価の馬のみ取得（馬番付き）"""
     url = f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
@@ -66,13 +67,20 @@ def scrape_good_horses(race_id):
             if len(cells) < 4:
                 continue
             cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
+
+            # A評価のみ（Bは除外）
             grade = None
             for t in cell_texts:
-                if t.strip() in ["A", "B"]:
-                    grade = t.strip()
+                if t.strip() == "A":
+                    grade = "A"
                     break
             if not grade:
                 continue
+
+            # 馬番はインデックス1のセル
+            banum = cell_texts[1].strip() if len(cell_texts) > 1 else ""
+
+            # 馬名はインデックス3（「馬名 前走」形式）
             horse_name = None
             comment = ""
             if len(cells) >= 4:
@@ -83,8 +91,14 @@ def scrape_good_horses(race_id):
                     horse_name = name_part
                     if len(cells) >= 5:
                         comment = cell_texts[4].strip()
-            if horse_name:
-                good_horses.append({"name": horse_name, "comment": comment, "grade": grade})
+
+            if horse_name and banum.isdigit():
+                good_horses.append({
+                    "banum": banum,
+                    "name": horse_name,
+                    "comment": comment,
+                    "grade": grade
+                })
         return good_horses
     except Exception as e:
         print(f"Error {race_id}: {e}")
@@ -99,7 +113,6 @@ def build_line_messages(date_str=None):
     if not race_ids:
         return [f"📭 {date_display} のレース情報が見つかりませんでした。"]
 
-    # 場ごとにまとめる
     place_groups = {}
     for race_id in race_ids:
         place_code = race_id[4:6]
@@ -108,7 +121,6 @@ def build_line_messages(date_str=None):
             place_groups[place_name] = []
         place_groups[place_name].append(race_id)
 
-    # 各場のB以上馬を収集
     place_results = []
     for place_name, ids in place_groups.items():
         lines = []
@@ -120,17 +132,15 @@ def build_line_messages(date_str=None):
                 found = True
                 lines.append(f"{race_num}R")
                 for h in horses:
-                    emoji = "⭐" if h["grade"] == "A" else "✅"
                     comment = f"({h['comment']})" if h['comment'] else ""
-                    lines.append(f"  {emoji}{h['grade']} {h['name']} {comment}")
+                    lines.append(f"  ⭐A {h['banum']}番 {h['name']} {comment}")
         if found:
             place_results.append(f"【{place_name}】\n" + "\n".join(lines))
 
     if not place_results:
-        return [f"🏇 {date_display}\n本日はB評価以上の馬が見当たりませんでした。"]
+        return [f"🏇 {date_display}\n本日はA評価の馬が見当たりませんでした。"]
 
-    # メッセージを5000文字以内に分割（最大5メッセージ）
-    header = f"🏇 {date_display} 調教評価（B以上）"
+    header = f"🏇 {date_display} 調教評価A（最高評価）"
     messages = []
     current = header
     for block in place_results:
@@ -141,7 +151,6 @@ def build_line_messages(date_str=None):
             current += "\n\n" + block
     messages.append(current)
 
-    # LINEは1返信最大5メッセージ
     return messages[:5]
 
 @app.route("/callback", methods=["POST"])
@@ -162,9 +171,9 @@ def handle_message(event):
     elif re.match(r'^\d{8}$', user_text):
         messages = build_line_messages(user_text)
     elif user_text in ["ヘルプ", "help", "使い方"]:
-        messages = ["🏇 使い方\n\n「今日」と送ると本日の全レースから調教評価B以上の馬を一覧表示します。\n\n日付指定: 20260315 のように8桁の日付も使えます。"]
+        messages = ["🏇 使い方\n\n「今日」と送ると本日の全レースから\n調教評価A（最高評価）の馬を一覧表示します。\n\n日付指定: 20260315 のように\n8桁の日付も使えます。"]
     else:
-        messages = ["「今日」と送ると調教評価レポートをお届けします 🏇"]
+        messages = ["「今日」と送ると調教評価Aの馬をお届けします ⭐"]
 
     text_messages = [TextMessage(text=m) for m in messages]
     with ApiClient(configuration) as api_client:
@@ -184,9 +193,9 @@ def health():
 def debug(race_id):
     try:
         horses = scrape_good_horses(race_id)
-        result = f"B以上の馬 ({len(horses)}頭)\n\n"
+        result = f"A評価の馬 ({len(horses)}頭)\n\n"
         for h in horses:
-            result += f"{h['grade']} {h['name']} ({h['comment']})\n"
+            result += f"⭐A {h['banum']}番 {h['name']} ({h['comment']})\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
