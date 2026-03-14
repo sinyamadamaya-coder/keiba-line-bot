@@ -51,30 +51,37 @@ def scrape_good_horses(race_id):
         res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
         good_horses = []
-        # tr要素で各行をパース
         rows = soup.find_all("tr")
         for row in rows:
-            cells = row.get_text(separator="\t").split("\t")
-            cells = [c.strip() for c in cells if c.strip()]
-            # 行の中にA/B評価があるか確認
-            grade = None
+            cells = row.find_all("td")
+            if not cells:
+                continue
+            # 各セルのテキストを取得（改行で分割して最初の要素を使う）
+            cell_texts = []
             for c in cells:
-                if c in ["A", "B"]:
-                    grade = c
+                t = c.get_text(strip=True)
+                # 改行が含まれる場合、最初の行（馬名部分）を取得
+                first_line = t.split("\n")[0].strip()
+                cell_texts.append(first_line)
+            # A/B評価があるか確認
+            grade = None
+            for t in cell_texts:
+                if t in ["A", "B"]:
+                    grade = t
                     break
             if not grade:
                 continue
-            # 馬名を探す（カタカナ2文字以上）
+            # カタカナを含む馬名セルを探す
             horse_name = None
             comment = ""
-            for i, c in enumerate(cells):
-                if re.match(r'^[\u30A0-\u30FF]{2,}$', c):
-                    horse_name = c
-                    # 馬名の後の短評を取得
-                    for j in range(i+1, len(cells)):
-                        if cells[j] not in ["A","B","C","D","前走"] and len(cells[j]) > 1 and not cells[j].isdigit():
-                            comment = cells[j]
-                            break
+            for i, t in enumerate(cell_texts):
+                if re.search(r'[\u30A0-\u30FF]{2,}', t):
+                    horse_name = t
+                    # 次のセルが短評
+                    if i + 1 < len(cell_texts):
+                        nxt = cell_texts[i + 1]
+                        if nxt not in ["A","B","C","D","前走",""] and not nxt.isdigit():
+                            comment = nxt
                     break
             if horse_name:
                 good_horses.append({"name": horse_name, "comment": comment, "grade": grade})
