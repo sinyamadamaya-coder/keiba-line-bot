@@ -121,7 +121,8 @@ def get_horse_links(race_id):
                 horse_id = m.group(1)
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
-                    horses.append({"name": name, "url": f"https://db.netkeiba.com/horse/{horse_id}/"})
+                    # /horse/result/{id}/ を使う（静的HTMLで成績テーブルあり）
+                    horses.append({"name": name, "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
         return horses
     except Exception as e:
         print(f"馬リスト取得エラー: {e}")
@@ -282,22 +283,20 @@ def health():
 
 @app.route("/debug2/<horse_id>", methods=["GET"])
 def debug2(horse_id):
-    url = f"https://db.netkeiba.com/horse/{horse_id}/"
+    url = f"https://db.netkeiba.com/horse/result/{horse_id}/"
     try:
         res = session.get(url, timeout=15)
         result = f"status: {res.status_code}\nfinal_url: {res.url}\n"
         html = res.content.decode("euc-jp", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         result += f"title: {soup.title.string if soup.title else 'no title'}\n"
-        tables = soup.find_all("table")
-        result += f"table_classes: {[' '.join(t.get('class', [])) for t in tables]}\n"
         t = soup.find("table", class_="db_h_race_results")
         if t:
             rows = t.find_all("tr")
             result += f"db_h_race_results: {len(rows)}行\n"
             for row in rows[1:4]:
                 cells = [td.get_text(strip=True) for td in row.find_all("td")]
-                result += f"  {cells[:5]}\n"
+                result += f"  {cells[:6]}\n"
         else:
             result += "db_h_race_results: NOT FOUND\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
