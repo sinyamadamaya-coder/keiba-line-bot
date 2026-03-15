@@ -120,49 +120,54 @@ def get_horse_links(race_id):
     try:
         soup = fetch_soup(url)
         horses = []
-        seen = set()
+        seen_ids = set()
         links = soup.find_all("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
         for a in links:
             name = a.get_text(strip=True)
             href = a.get("href", "")
             if not href.startswith("http"):
                 href = "https:" + href if href.startswith("//") else "https://db.netkeiba.com" + href
-            horse_id_m = re.search(r'/horse/(\d+)', href)
-            if horse_id_m and name and name not in seen and re.search(r'[\u30A0-\u30FF]{2,}', name):
-                seen.add(name)
-                horses.append({
-                    "name": name,
-                    "url": f"https://db.netkeiba.com/horse/{horse_id_m.group(1)}/"
-                })
+            m = re.search(r'/horse/(\d+)', href)
+            if m and name and re.search(r'[\u30A0-\u30FF]{2,}', name):
+                horse_id = m.group(1)
+                if horse_id not in seen_ids:
+                    seen_ids.add(horse_id)
+                    horses.append({
+                        "name": name,
+                        "url": f"https://db.netkeiba.com/horse/{horse_id}/"
+                    })
         return horses
     except Exception as e:
         print(f"馬リスト取得エラー: {e}")
         return []
 
 def check_past_results(horse_url, target_place, target_surface, target_distance):
+    """db.netkeiba（EUC-JP）の馬成績から同条件で1〜3着があるか確認"""
     try:
-        res = session.get(horse_url, timeout=15)
-        html = res.content.decode("utf-8", errors="replace")
-        soup = BeautifulSoup(html, "html.parser")
+        # db.netkeibaはEUC-JP
+        soup = fetch_soup(horse_url, encoding="euc-jp")
         table = soup.find("table", class_="db_h_race_results")
         if not table:
-            return False, "", "table not found"
+            return False, ""
         rows = table.find_all("tr")
         for row in rows[1:]:
             cells = [td.get_text(strip=True) for td in row.find_all("td")]
             if len(cells) < 15:
                 continue
-            kaisai = cells[1]
-            rank_str = cells[11]
-            dist_raw = cells[14]
+            kaisai = cells[1]    # 例: "1中山6"
+            rank_str = cells[11] # 着順
+            dist_raw = cells[14] # 例: "ダ1200"
+            # 着順チェック（1〜3着）
             try:
                 rank = int(rank_str)
                 if rank > 3:
                     continue
             except:
                 continue
+            # 競馬場チェック
             if target_place not in kaisai:
                 continue
+            # 芝ダ・距離チェック
             m = re.match(r'(芝|ダ)(\d+)', dist_raw)
             if not m:
                 continue
@@ -170,10 +175,11 @@ def check_past_results(horse_url, target_place, target_surface, target_distance)
                 continue
             if m.group(2) != target_distance:
                 continue
-            return True, f"{target_place}{dist_raw} {rank}着", ""
-        return False, "", "no match"
+            return True, f"{target_place}{dist_raw} {rank}着"
+        return False, ""
     except Exception as e:
-        return False, "", str(e)
+        print(f"過去成績取得エラー: {e}")
+        return False, ""
 
 def get_condition_matched_horses(race_id):
     condition = get_race_condition(race_id)
@@ -188,7 +194,7 @@ def get_condition_matched_horses(race_id):
         return [], condition_str
     matched = []
     for horse in horses:
-        hit, detail, _ = check_past_results(horse["url"], target_place, target_surface, target_distance)
+        hit, detail = check_past_results(horse["url"], target_place, target_surface, target_distance)
         if hit:
             matched.append({"name": horse["name"], "detail": detail})
     return matched, condition_str
@@ -304,32 +310,14 @@ def health():
 @app.route("/debug/<race_id>", methods=["GET"])
 def debug(race_id):
     try:
-        result = ""
-        # レース条件
-        condition = get_race_condition(race_id)
-        result += f"レース条件: {condition}\n\n"
-
-        # 馬リスト
-        horses = get_horse_links(race_id)
-        result += f"出走馬リスト ({len(horses)}頭)\n"
-        for h in horses:
-            result += f"  {h['name']} → {h['url']}\n"
-
-        # 各馬の過去成績チェック
-        if condition:
-            result += f"\n--- 同条件チェック ({condition['place']}・{condition['surface']}{condition['distance']}m) ---\n"
-            for h in horses[:5]:  # 最初の5頭のみ詳細表示
-                hit, detail, err = check_past_results(
-                    h['url'], condition['place'], condition['surface'], condition['distance']
-                )
-                result += f"  {h['name']}: {'✅ ' + detail if hit else '✗ ' + err}\n"
-
-        # A評価
-        a_horses = scrape_good_horses(race_id)
-        result += f"\nA評価の馬 ({len(a_horses)}頭)\n"
-        for h in a_horses:
-            result += f"  ⭐A {h['banum']}番 {h['name']}\n"
-
+        horses_a = scrape_good_horses(race_id)
+        result = f"A評価の馬 ({len(horses_a)}頭)\n"
+        for h in horses_a:
+            result += f"⭐A {h['banum']}番 {h['name']} ({h['comment']})\n"
+        matched, cond_str = get_condition_matched_horses(race_id)
+        result += f"\n同条件({cond_str})で過去3着内 ({len(matched)}頭)\n"
+        for h in matched:
+            result += f"🔁 {h['name']} [{h['detail']}]\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
