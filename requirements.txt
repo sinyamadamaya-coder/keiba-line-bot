@@ -3,3 +3,4 @@ line-bot-sdk
 requests
 beautifulsoup4
 gunicorn
+gevent
