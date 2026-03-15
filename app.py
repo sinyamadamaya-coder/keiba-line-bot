@@ -128,13 +128,18 @@ def get_horse_links(race_id):
         print(f"馬リスト取得エラー: {e}")
         return []
 
-def check_past_results(horse_url, target_place, target_surface, target_distance):
+def get_condition_stats(horse_url, target_place, target_surface, target_distance):
+    """
+    同条件の全成績を集計して「1着-2着-3着-着外」形式で返す
+    3着以内が1回以上あれば (True, "3-0-1-2") のように返す
+    """
     try:
         soup = fetch_soup(horse_url, encoding="euc-jp")
         table = soup.find("table", class_="db_h_race_results")
         if not table:
             return False, ""
         rows = table.find_all("tr")
+        w1, w2, w3, out = 0, 0, 0, 0
         for row in rows[1:]:
             cells = [td.get_text(strip=True) for td in row.find_all("td")]
             if len(cells) < 15:
@@ -142,14 +147,10 @@ def check_past_results(horse_url, target_place, target_surface, target_distance)
             kaisai = cells[1]
             rank_str = cells[11]
             dist_raw = cells[14]
-            try:
-                rank = int(rank_str)
-                if rank > 3:
-                    continue
-            except:
-                continue
+            # 競馬場チェック
             if target_place not in kaisai:
                 continue
+            # 芝ダ・距離チェック
             m = re.match(r'(芝|ダ)(\d+)', dist_raw)
             if not m:
                 continue
@@ -157,8 +158,27 @@ def check_past_results(horse_url, target_place, target_surface, target_distance)
                 continue
             if m.group(2) != target_distance:
                 continue
-            return True, f"{target_place}{dist_raw} {rank}着"
-        return False, ""
+            # 着順を集計
+            try:
+                rank = int(rank_str)
+                if rank == 1:
+                    w1 += 1
+                elif rank == 2:
+                    w2 += 1
+                elif rank == 3:
+                    w3 += 1
+                else:
+                    out += 1
+            except:
+                out += 1
+        total = w1 + w2 + w3 + out
+        if total == 0:
+            return False, ""
+        stat_str = f"{w1}-{w2}-{w3}-{out}"
+        # 3着以内が1回以上ある場合のみ表示
+        if w1 + w2 + w3 > 0:
+            return True, stat_str
+        return False, stat_str
     except Exception as e:
         print(f"過去成績取得エラー: {e}")
         return False, ""
@@ -176,9 +196,9 @@ def get_condition_matched_horses(race_id):
         return [], condition_str
     matched = []
     for horse in horses:
-        hit, detail = check_past_results(horse["url"], target_place, target_surface, target_distance)
+        hit, stat = get_condition_stats(horse["url"], target_place, target_surface, target_distance)
         if hit:
-            matched.append({"name": horse["name"], "detail": detail})
+            matched.append({"name": horse["name"], "stat": stat})
     return matched, condition_str
 
 def build_line_messages(date_str=None):
@@ -195,6 +215,7 @@ def build_line_messages(date_str=None):
         if place_name not in place_groups:
             place_groups[place_name] = []
         place_groups[place_name].append(race_id)
+
     a_results = []
     for place_name, ids in place_groups.items():
         lines = []
@@ -210,6 +231,7 @@ def build_line_messages(date_str=None):
                     lines.append(f"  ⭐A {h['banum']}番 {h['name']} {comment}")
         if found:
             a_results.append(f"【{place_name}】\n" + "\n".join(lines))
+
     cond_results = []
     for place_name, ids in place_groups.items():
         lines = []
@@ -221,9 +243,10 @@ def build_line_messages(date_str=None):
                 found = True
                 lines.append(f"{race_num}R ({cond_str})")
                 for h in matched:
-                    lines.append(f"  🔁 {h['name']} [{h['detail']}]")
+                    lines.append(f"  🔁 {h['name']} [{h['stat']}]")
         if found:
             cond_results.append(f"【{place_name}】\n" + "\n".join(lines))
+
     messages = []
     if a_results:
         current = f"🏇 {date_display} 調教評価A"
@@ -236,8 +259,9 @@ def build_line_messages(date_str=None):
         messages.append(current)
     else:
         messages.append(f"🏇 {date_display}\n本日はA評価の馬が見当たりませんでした。")
+
     if cond_results:
-        current = f"🔁 {date_display} 同条件で過去3着内あり"
+        current = f"🔁 {date_display} 同条件で過去3着内あり（1着-2着-3着-着外）"
         for block in cond_results:
             if len(current) + len(block) + 2 > 4800:
                 messages.append(current)
@@ -247,10 +271,10 @@ def build_line_messages(date_str=None):
         messages.append(current)
     else:
         messages.append(f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。")
+
     return messages[:5]
 
 def send_push_messages(user_id, date_str=None):
-    """バックグラウンドで処理してPush APIで送信"""
     try:
         messages = build_line_messages(date_str)
         text_messages = [TextMessage(text=m) for m in messages]
@@ -276,8 +300,6 @@ def callback():
 def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
-
-    # まず即座にReplyして5秒タイムアウトを回避
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
@@ -286,7 +308,6 @@ def handle_message(event):
                 messages=[TextMessage(text="📊 データを収集中です...\n少々お待ちください（1〜2分）")]
             )
         )
-
     if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
         t = threading.Thread(target=send_push_messages, args=(user_id,))
         t.daemon = True
@@ -301,34 +322,13 @@ def handle_message(event):
             line_bot_api.push_message(
                 PushMessageRequest(
                     to=user_id,
-                    messages=[TextMessage(text="🏇 使い方\n\n「今日」と送ると:\n⭐ 調教評価Aの馬\n🔁 同条件で過去3着内の馬\nを表示します。\n\n結果は1〜2分後に届きます。")]
+                    messages=[TextMessage(text="🏇 使い方\n\n「今日」と送ると:\n⭐ 調教評価Aの馬\n🔁 同条件で過去3着内の馬\n（1着-2着-3着-着外 形式）\nを表示します。")]
                 )
             )
 
 @app.route("/", methods=["GET"])
 def health():
     return "🏇 Keiba LINE Bot is running!"
-
-@app.route("/debug2/<horse_id>", methods=["GET"])
-def debug2(horse_id):
-    url = f"https://db.netkeiba.com/horse/result/{horse_id}/"
-    try:
-        res = session.get(url, timeout=15)
-        html = res.content.decode("euc-jp", errors="replace")
-        soup = BeautifulSoup(html, "html.parser")
-        result = f"status: {res.status_code}\ntitle: {soup.title.string if soup.title else 'no title'}\n"
-        t = soup.find("table", class_="db_h_race_results")
-        if t:
-            rows = t.find_all("tr")
-            result += f"db_h_race_results: {len(rows)}行\n"
-            for row in rows[1:4]:
-                cells = [td.get_text(strip=True) for td in row.find_all("td")]
-                result += f"  {cells[:6]}\n"
-        else:
-            result += "db_h_race_results: NOT FOUND\n"
-        return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
-    except Exception as e:
-        return f"Error: {e}", 500
 
 @app.route("/debug/<race_id>", methods=["GET"])
 def debug(race_id):
@@ -340,7 +340,7 @@ def debug(race_id):
         matched, cond_str = get_condition_matched_horses(race_id)
         result += f"\n同条件({cond_str})で過去3着内 ({len(matched)}頭)\n"
         for h in matched:
-            result += f"  🔁 {h['name']} [{h['detail']}]\n"
+            result += f"  🔁 {h['name']} [{h['stat']}]\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
