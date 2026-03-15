@@ -106,15 +106,24 @@ def get_race_condition(race_id):
         return None
 
 def get_horse_links(race_id):
+    """出馬表から馬番・馬名・過去成績URLを取得"""
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
         horses = []
         seen_ids = set()
-        links = soup.find_all("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
-        for a in links:
-            name = a.get_text(strip=True)
-            href = a.get("href", "")
+        # tr.HorseList 各行から馬番と馬名リンクを取得
+        rows = soup.find_all("tr", class_="HorseList")
+        for row in rows:
+            # 馬番: class名が"Umaban"で始まるtd
+            banum_td = row.find("td", class_=re.compile(r'^Umaban'))
+            banum = banum_td.get_text(strip=True) if banum_td else ""
+            # 馬名リンク
+            link = row.find("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
+            if not link:
+                continue
+            name = link.get_text(strip=True)
+            href = link.get("href", "")
             if not href.startswith("http"):
                 href = "https:" + href if href.startswith("//") else "https://db.netkeiba.com" + href
             m = re.search(r'/horse/(\d+)', href)
@@ -122,17 +131,32 @@ def get_horse_links(race_id):
                 horse_id = m.group(1)
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
-                    horses.append({"name": name, "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
+                    horses.append({
+                        "banum": banum,
+                        "name": name,
+                        "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"
+                    })
+        # HorseListが取れなかった場合はリンクのみで取得（馬番なし）
+        if not horses:
+            links = soup.find_all("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
+            for a in links:
+                name = a.get_text(strip=True)
+                href = a.get("href", "")
+                if not href.startswith("http"):
+                    href = "https:" + href if href.startswith("//") else "https://db.netkeiba.com" + href
+                m = re.search(r'/horse/(\d+)', href)
+                if m and name and re.search(r'[\u30A0-\u30FF]{2,}', name):
+                    horse_id = m.group(1)
+                    if horse_id not in seen_ids:
+                        seen_ids.add(horse_id)
+                        horses.append({"banum": "", "name": name, "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
         return horses
     except Exception as e:
         print(f"馬リスト取得エラー: {e}")
         return []
 
 def get_condition_stats(horse_url, target_place, target_surface, target_distance):
-    """
-    同条件の全成績を集計して「1着-2着-3着-着外」形式で返す
-    3着以内が1回以上あれば (True, "3-0-1-2") のように返す
-    """
+    """同条件の全成績を 1着-2着-3着-着外 形式で返す"""
     try:
         soup = fetch_soup(horse_url, encoding="euc-jp")
         table = soup.find("table", class_="db_h_race_results")
@@ -147,10 +171,8 @@ def get_condition_stats(horse_url, target_place, target_surface, target_distance
             kaisai = cells[1]
             rank_str = cells[11]
             dist_raw = cells[14]
-            # 競馬場チェック
             if target_place not in kaisai:
                 continue
-            # 芝ダ・距離チェック
             m = re.match(r'(芝|ダ)(\d+)', dist_raw)
             if not m:
                 continue
@@ -158,27 +180,20 @@ def get_condition_stats(horse_url, target_place, target_surface, target_distance
                 continue
             if m.group(2) != target_distance:
                 continue
-            # 着順を集計
             try:
                 rank = int(rank_str)
-                if rank == 1:
-                    w1 += 1
-                elif rank == 2:
-                    w2 += 1
-                elif rank == 3:
-                    w3 += 1
-                else:
-                    out += 1
+                if rank == 1: w1 += 1
+                elif rank == 2: w2 += 1
+                elif rank == 3: w3 += 1
+                else: out += 1
             except:
                 out += 1
         total = w1 + w2 + w3 + out
         if total == 0:
             return False, ""
-        stat_str = f"{w1}-{w2}-{w3}-{out}"
-        # 3着以内が1回以上ある場合のみ表示
         if w1 + w2 + w3 > 0:
-            return True, stat_str
-        return False, stat_str
+            return True, f"{w1}-{w2}-{w3}-{out}"
+        return False, f"{w1}-{w2}-{w3}-{out}"
     except Exception as e:
         print(f"過去成績取得エラー: {e}")
         return False, ""
@@ -198,7 +213,7 @@ def get_condition_matched_horses(race_id):
     for horse in horses:
         hit, stat = get_condition_stats(horse["url"], target_place, target_surface, target_distance)
         if hit:
-            matched.append({"name": horse["name"], "stat": stat})
+            matched.append({"banum": horse["banum"], "name": horse["name"], "stat": stat})
     return matched, condition_str
 
 def build_line_messages(date_str=None):
@@ -243,7 +258,8 @@ def build_line_messages(date_str=None):
                 found = True
                 lines.append(f"{race_num}R ({cond_str})")
                 for h in matched:
-                    lines.append(f"  🔁 {h['name']} [{h['stat']}]")
+                    banum_str = f"{h['banum']}番 " if h['banum'] else ""
+                    lines.append(f"  🔁 {banum_str}{h['name']} [{h['stat']}]")
         if found:
             cond_results.append(f"【{place_name}】\n" + "\n".join(lines))
 
@@ -340,7 +356,8 @@ def debug(race_id):
         matched, cond_str = get_condition_matched_horses(race_id)
         result += f"\n同条件({cond_str})で過去3着内 ({len(matched)}頭)\n"
         for h in matched:
-            result += f"  🔁 {h['name']} [{h['stat']}]\n"
+            banum_str = f"{h['banum']}番 " if h['banum'] else ""
+            result += f"  🔁 {banum_str}{h['name']} [{h['stat']}]\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
         return f"Error: {e}", 500
