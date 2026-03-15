@@ -1,12 +1,13 @@
 import os
 import re
+import threading
 import requests
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi,
-    ReplyMessageRequest, TextMessage
+    ReplyMessageRequest, PushMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from bs4 import BeautifulSoup
@@ -121,7 +122,6 @@ def get_horse_links(race_id):
                 horse_id = m.group(1)
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
-                    # /horse/result/{id}/ を使う（静的HTMLで成績テーブルあり）
                     horses.append({"name": name, "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
         return horses
     except Exception as e:
@@ -249,6 +249,19 @@ def build_line_messages(date_str=None):
         messages.append(f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。")
     return messages[:5]
 
+def send_push_messages(user_id, date_str=None):
+    """バックグラウンドで処理してPush APIで送信"""
+    try:
+        messages = build_line_messages(date_str)
+        text_messages = [TextMessage(text=m) for m in messages]
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(to=user_id, messages=text_messages)
+            )
+    except Exception as e:
+        print(f"Push送信エラー: {e}")
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
@@ -261,21 +274,36 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    user_id = event.source.user_id
     user_text = event.message.text.strip()
-    if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
-        messages = build_line_messages()
-    elif re.match(r'^\d{8}$', user_text):
-        messages = build_line_messages(user_text)
-    elif user_text in ["ヘルプ", "help", "使い方"]:
-        messages = ["🏇 使い方\n\n「今日」と送ると:\n⭐ 調教評価Aの馬\n🔁 同条件で過去3着内の馬\nを表示します。"]
-    else:
-        messages = ["「今日」と送ると調教評価と過去成績レポートをお届けします 🏇"]
-    text_messages = [TextMessage(text=m) for m in messages]
+
+    # まず即座にReplyして5秒タイムアウトを回避
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=text_messages)
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text="📊 データを収集中です...\n少々お待ちください（1〜2分）")]
+            )
         )
+
+    if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
+        t = threading.Thread(target=send_push_messages, args=(user_id,))
+        t.daemon = True
+        t.start()
+    elif re.match(r'^\d{8}$', user_text):
+        t = threading.Thread(target=send_push_messages, args=(user_id, user_text))
+        t.daemon = True
+        t.start()
+    elif user_text in ["ヘルプ", "help", "使い方"]:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text="🏇 使い方\n\n「今日」と送ると:\n⭐ 調教評価Aの馬\n🔁 同条件で過去3着内の馬\nを表示します。\n\n結果は1〜2分後に届きます。")]
+                )
+            )
 
 @app.route("/", methods=["GET"])
 def health():
@@ -286,10 +314,9 @@ def debug2(horse_id):
     url = f"https://db.netkeiba.com/horse/result/{horse_id}/"
     try:
         res = session.get(url, timeout=15)
-        result = f"status: {res.status_code}\nfinal_url: {res.url}\n"
         html = res.content.decode("euc-jp", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
-        result += f"title: {soup.title.string if soup.title else 'no title'}\n"
+        result = f"status: {res.status_code}\ntitle: {soup.title.string if soup.title else 'no title'}\n"
         t = soup.find("table", class_="db_h_race_results")
         if t:
             rows = t.find_all("tr")
