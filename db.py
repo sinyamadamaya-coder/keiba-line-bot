@@ -32,6 +32,7 @@ def init_db():
     print("[DB] テーブル初期化完了")
 
 def get_sire_stats(sire_name, generation, surface, distance, place=None):
+    """父馬/母父馬の条件別成績を取得"""
     sql = """
         SELECT wins, second, third, out_count
         FROM sire_stats
@@ -47,23 +48,30 @@ def get_sire_stats(sire_name, generation, surface, distance, place=None):
     return {"wins": row[0], "second": row[1], "third": row[2], "out": row[3]}
 
 def upsert_sire_stats(records):
+    """血統成績を一括UPSERT（updated_atはDB側でCURRENT_TIMESTAMPを使用）"""
     sql = """
-        INSERT INTO sire_stats (sire_name, generation, surface, distance, place,
-                                wins, second, third, out_count, updated_at)
+        INSERT INTO sire_stats
+            (sire_name, generation, surface, distance, place, wins, second, third, out_count)
         VALUES %s
         ON CONFLICT (sire_name, generation, surface, distance, place)
-        DO UPDATE SET wins=EXCLUDED.wins, second=EXCLUDED.second,
-                      third=EXCLUDED.third, out_count=EXCLUDED.out_count,
-                      updated_at=CURRENT_TIMESTAMP
+        DO UPDATE SET
+            wins      = EXCLUDED.wins,
+            second    = EXCLUDED.second,
+            third     = EXCLUDED.third,
+            out_count = EXCLUDED.out_count,
+            updated_at = CURRENT_TIMESTAMP
     """
-    values = [(r["sire_name"],r["generation"],r["surface"],r["distance"],
-               r.get("place"),r["wins"],r["second"],r["third"],r["out_count"])
-              for r in records]
+    values = [(
+        r["sire_name"], r["generation"], r["surface"],
+        r["distance"], r.get("place"),
+        r["wins"], r["second"], r["third"], r["out_count"]
+    ) for r in records]
     with get_conn() as conn:
         with conn.cursor() as cur:
             execute_values(cur, sql, values)
 
 def get_jockey_stats(jockey_name, surface, distance, place=None):
+    """騎手の条件別成績を取得"""
     sql = """
         SELECT wins, second, third, out_count
         FROM jockey_stats
@@ -79,18 +87,23 @@ def get_jockey_stats(jockey_name, surface, distance, place=None):
     return {"wins": row[0], "second": row[1], "third": row[2], "out": row[3]}
 
 def upsert_jockey_stats(records):
+    """騎手成績を一括UPSERT（updated_atはDB側でCURRENT_TIMESTAMPを使用）"""
     sql = """
-        INSERT INTO jockey_stats (jockey_name, surface, distance, place,
-                                  wins, second, third, out_count, updated_at)
+        INSERT INTO jockey_stats
+            (jockey_name, surface, distance, place, wins, second, third, out_count)
         VALUES %s
         ON CONFLICT (jockey_name, surface, distance, place)
-        DO UPDATE SET wins=EXCLUDED.wins, second=EXCLUDED.second,
-                      third=EXCLUDED.third, out_count=EXCLUDED.out_count,
-                      updated_at=CURRENT_TIMESTAMP
+        DO UPDATE SET
+            wins      = EXCLUDED.wins,
+            second    = EXCLUDED.second,
+            third     = EXCLUDED.third,
+            out_count = EXCLUDED.out_count,
+            updated_at = CURRENT_TIMESTAMP
     """
-    values = [(r["jockey_name"],r["surface"],r["distance"],r.get("place"),
-               r["wins"],r["second"],r["third"],r["out_count"])
-              for r in records]
+    values = [(
+        r["jockey_name"], r["surface"], r["distance"], r.get("place"),
+        r["wins"], r["second"], r["third"], r["out_count"]
+    ) for r in records]
     with get_conn() as conn:
         with conn.cursor() as cur:
             execute_values(cur, sql, values)
