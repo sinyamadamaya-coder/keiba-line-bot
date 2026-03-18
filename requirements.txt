@@ -4,3 +4,6 @@ requests
 beautifulsoup4
 gunicorn
 gevent
+apscheduler
+pytz
+psycopg2-binary
