@@ -84,32 +84,25 @@ def scrape_good_horses(race_id):
     try:
         soup = fetch_soup(url)
         good_horses = []
-        rows = soup.find_all("tr")
-        for row in rows:
+        for row in soup.find_all("tr"):
             cells = row.find_all("td")
             if len(cells) < 4:
                 continue
             cell_texts = [c.get_text(separator=" ", strip=True) for c in cells]
-            grade = None
-            for t in cell_texts:
-                if t.strip() == "A":
-                    grade = "A"
-                    break
+            grade = next((t for t in cell_texts if t.strip() == "A"), None)
             if not grade:
                 continue
             banum = cell_texts[1].strip() if len(cell_texts) > 1 else ""
-            horse_name = None
-            comment = ""
+            horse_name, comment = None, ""
             if len(cells) >= 4:
-                name_cell = cell_texts[3]
-                name_part = name_cell.split("前走")[0].strip()
-                name_part = name_part.split()[0] if name_part.split() else ""
+                name_part = cell_texts[3].split("前走")[0].strip().split()
+                name_part = name_part[0] if name_part else ""
                 if re.search(r'[\u30A0-\u30FF]{2,}', name_part):
                     horse_name = name_part
                     if len(cells) >= 5:
                         comment = cell_texts[4].strip()
             if horse_name and banum.isdigit():
-                good_horses.append({"banum": banum, "name": horse_name, "comment": comment, "grade": grade})
+                good_horses.append({"banum": banum, "name": horse_name, "comment": comment})
         return good_horses
     except Exception as e:
         print(f"Error {race_id}: {e}")
@@ -121,11 +114,10 @@ def get_race_condition(race_id):
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
-        text = soup.get_text()
-        dist_match = re.search(r'(芝|ダ)(\d{3,4})', text)
-        if not dist_match:
+        m = re.search(r'(芝|ダ)(\d{3,4})', soup.get_text())
+        if not m:
             return None
-        return {"place": place_name, "surface": dist_match.group(1), "distance": dist_match.group(2)}
+        return {"place": place_name, "surface": m.group(1), "distance": m.group(2)}
     except Exception as e:
         print(f"レース条件取得エラー {race_id}: {e}")
         return None
@@ -134,10 +126,8 @@ def get_horse_links(race_id):
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
-        horses = []
-        seen_ids = set()
-        rows = soup.find_all("tr", class_="HorseList")
-        for row in rows:
+        horses, seen_ids = [], set()
+        for row in soup.find_all("tr", class_="HorseList"):
             banum_td = row.find("td", class_=re.compile(r'^Umaban'))
             banum = banum_td.get_text(strip=True) if banum_td else ""
             link = row.find("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
@@ -152,7 +142,8 @@ def get_horse_links(race_id):
                 horse_id = m.group(1)
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
-                    horses.append({"banum": banum, "name": name, "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
+                    horses.append({"banum": banum, "name": name,
+                                   "url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
         return horses
     except Exception as e:
         print(f"馬リスト取得エラー: {e}")
@@ -164,9 +155,8 @@ def get_condition_stats(horse_url, target_place, target_surface, target_distance
         table = soup.find("table", class_="db_h_race_results")
         if not table:
             return False, ""
-        rows = table.find_all("tr")
         w1, w2, w3, out = 0, 0, 0, 0
-        for row in rows[1:]:
+        for row in table.find_all("tr")[1:]:
             cells = [td.get_text(strip=True) for td in row.find_all("td")]
             if len(cells) < 15:
                 continue
@@ -199,8 +189,6 @@ def get_condition_matched_horses(race_id):
     tp, ts, td = condition["place"], condition["surface"], condition["distance"]
     condition_str = f"{tp}・{ts}{td}m"
     horses = get_horse_links(race_id)
-    if not horses:
-        return [], condition_str
     matched = []
     for horse in horses:
         hit, stat = get_condition_stats(horse["url"], tp, ts, td)
@@ -208,13 +196,44 @@ def get_condition_matched_horses(race_id):
             matched.append({"banum": horse["banum"], "name": horse["name"], "stat": stat})
     return matched, condition_str
 
+def get_horse_sire_info(horse_result_url):
+    """馬の成績ページから父馬・母父馬名を取得"""
+    try:
+        soup = fetch_soup(horse_result_url, encoding="euc-jp")
+        sire, bms = "", ""
+        # プロフィールテーブルから父馬・母父馬を取得
+        profile = soup.find("table", class_="db_prof_table")
+        if profile:
+            for row in profile.find_all("tr"):
+                th = row.find("th")
+                td = row.find("td")
+                if th and td:
+                    label = th.get_text(strip=True)
+                    if label == "父":
+                        sire = td.get_text(strip=True)
+                    elif label == "母父":
+                        bms = td.get_text(strip=True)
+        # 見つからない場合はリンクから探す
+        if not sire:
+            sire_links = soup.find_all("a", href=re.compile(r"/horse/sire/"))
+            if sire_links:
+                sire = sire_links[0].get_text(strip=True)
+            if len(sire_links) > 1:
+                bms = sire_links[1].get_text(strip=True)
+        return sire, bms
+    except Exception:
+        return "", ""
+
 def get_sire_jockey_info(race_id):
+    """各馬のresultページから父馬・母父馬を取得し、DBの成績と照合"""
     if not DB_ENABLED:
         return []
     condition = get_race_condition(race_id)
     if not condition:
         return []
-    surface, distance, place = condition["surface"], condition["distance"], condition["place"]
+    surface = condition["surface"]
+    distance = condition["distance"]
+    place = condition["place"]
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
@@ -226,11 +245,20 @@ def get_sire_jockey_info(race_id):
             if not name_link:
                 continue
             horse_name = name_link.get_text(strip=True)
-            sire_links = row.find_all("a", href=re.compile(r"/horse/sire/"))
-            sire = sire_links[0].get_text(strip=True) if sire_links else ""
-            bms = sire_links[1].get_text(strip=True) if len(sire_links) > 1 else ""
+            href = name_link.get("href", "")
+            if not href.startswith("http"):
+                href = "https:" + href if href.startswith("//") else "https://db.netkeiba.com" + href
+            m = re.search(r'/horse/(\d+)', href)
+            horse_id = m.group(1) if m else None
+            # 騎手名
             jockey_td = row.find("td", class_="Jockey")
             jockey = jockey_td.get_text(strip=True) if jockey_td else ""
+            # 父馬・母父馬は各馬のresultページから取得
+            sire, bms = "", ""
+            if horse_id:
+                result_url = f"https://db.netkeiba.com/horse/result/{horse_id}/"
+                sire, bms = get_horse_sire_info(result_url)
+            # DBから成績照合
             sire_stat = stats_to_str(get_sire_stats(sire, 1, surface, int(distance), place)) if sire else None
             bms_stat = stats_to_str(get_sire_stats(bms, 2, surface, int(distance), place)) if bms else None
             jockey_stat = stats_to_str(get_jockey_stats(jockey, surface, int(distance), place)) if jockey else None
@@ -254,9 +282,9 @@ def build_line_messages(date_str=None):
     if not race_ids:
         return [f"📭 {date_display} のレース情報が見つかりませんでした。"]
     place_groups = {}
-    for race_id in race_ids:
-        pname = PLACE_MAP.get(race_id[4:6], f"場{race_id[4:6]}")
-        place_groups.setdefault(pname, []).append(race_id)
+    for rid in race_ids:
+        pname = PLACE_MAP.get(rid[4:6], f"場{rid[4:6]}")
+        place_groups.setdefault(pname, []).append(rid)
 
     def pack(header, blocks):
         if not blocks:
