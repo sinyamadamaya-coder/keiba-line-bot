@@ -170,15 +170,11 @@ def get_condition_stats(horse_url, target_place, target_surface, target_distance
             cells = [td.get_text(strip=True) for td in row.find_all("td")]
             if len(cells) < 15:
                 continue
-            kaisai = cells[1]
-            rank_str = cells[11]
-            dist_raw = cells[14]
+            kaisai, rank_str, dist_raw = cells[1], cells[11], cells[14]
             if target_place not in kaisai:
                 continue
             m = re.match(r'(芝|ダ)(\d+)', dist_raw)
-            if not m:
-                continue
-            if m.group(1) != target_surface or m.group(2) != target_distance:
+            if not m or m.group(1) != target_surface or m.group(2) != target_distance:
                 continue
             try:
                 rank = int(rank_str)
@@ -200,16 +196,14 @@ def get_condition_matched_horses(race_id):
     condition = get_race_condition(race_id)
     if not condition:
         return [], ""
-    target_place = condition["place"]
-    target_surface = condition["surface"]
-    target_distance = condition["distance"]
-    condition_str = f"{target_place}・{target_surface}{target_distance}m"
+    tp, ts, td = condition["place"], condition["surface"], condition["distance"]
+    condition_str = f"{tp}・{ts}{td}m"
     horses = get_horse_links(race_id)
     if not horses:
         return [], condition_str
     matched = []
     for horse in horses:
-        hit, stat = get_condition_stats(horse["url"], target_place, target_surface, target_distance)
+        hit, stat = get_condition_stats(horse["url"], tp, ts, td)
         if hit:
             matched.append({"banum": horse["banum"], "name": horse["name"], "stat": stat})
     return matched, condition_str
@@ -220,27 +214,21 @@ def get_sire_jockey_info(race_id):
     condition = get_race_condition(race_id)
     if not condition:
         return []
-    surface = condition["surface"]
-    distance = condition["distance"]
-    place = condition["place"]
+    surface, distance, place = condition["surface"], condition["distance"], condition["place"]
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
         results = []
-        rows = soup.find_all("tr", class_="HorseList")
-        for row in rows:
+        for row in soup.find_all("tr", class_="HorseList"):
             banum_td = row.find("td", class_=re.compile(r'^Umaban'))
             banum = banum_td.get_text(strip=True) if banum_td else ""
             name_link = row.find("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
             if not name_link:
                 continue
             horse_name = name_link.get_text(strip=True)
-            sire, bms = "", ""
             sire_links = row.find_all("a", href=re.compile(r"/horse/sire/"))
-            if sire_links:
-                sire = sire_links[0].get_text(strip=True)
-            if len(sire_links) > 1:
-                bms = sire_links[1].get_text(strip=True)
+            sire = sire_links[0].get_text(strip=True) if sire_links else ""
+            bms = sire_links[1].get_text(strip=True) if len(sire_links) > 1 else ""
             jockey_td = row.find("td", class_="Jockey")
             jockey = jockey_td.get_text(strip=True) if jockey_td else ""
             sire_stat = stats_to_str(get_sire_stats(sire, 1, surface, int(distance), place)) if sire else None
@@ -267,93 +255,76 @@ def build_line_messages(date_str=None):
         return [f"📭 {date_display} のレース情報が見つかりませんでした。"]
     place_groups = {}
     for race_id in race_ids:
-        place_code = race_id[4:6]
-        place_name = PLACE_MAP.get(place_code, f"場{place_code}")
-        place_groups.setdefault(place_name, []).append(race_id)
+        pname = PLACE_MAP.get(race_id[4:6], f"場{race_id[4:6]}")
+        place_groups.setdefault(pname, []).append(race_id)
 
-    def build_block(groups, race_fn, header_fn, line_fn, found_check):
-        results = []
-        for place_name, ids in groups.items():
-            lines = []
-            found = False
-            for race_id in sorted(ids):
-                race_num = int(race_id[10:12])
-                data = race_fn(race_id)
-                if found_check(data):
-                    found = True
-                    lines.append(f"{race_num}R")
-                    for item in data:
-                        lines.append(line_fn(item))
-            if found:
-                results.append(f"【{place_name}】\n" + "\n".join(lines))
-        return results
-
-    def pack_messages(header, blocks):
+    def pack(header, blocks):
         if not blocks:
             return []
-        msgs = []
-        current = header
-        for block in blocks:
-            if len(current) + len(block) + 2 > 4800:
-                msgs.append(current)
-                current = block
+        msgs, cur = [], header
+        for b in blocks:
+            if len(cur) + len(b) + 2 > 4800:
+                msgs.append(cur); cur = b
             else:
-                current += "\n\n" + block
-        msgs.append(current)
+                cur += "\n\n" + b
+        msgs.append(cur)
         return msgs
 
-    a_blocks = build_block(
-        place_groups,
-        scrape_good_horses,
-        lambda p: f"🏇 {date_display} 調教評価A",
-        lambda h: f"  ⭐A {h['banum']}番 {h['name']} {'(' + h['comment'] + ')' if h['comment'] else ''}",
-        lambda d: bool(d)
-    )
+    a_blocks = []
+    for pname, ids in place_groups.items():
+        lines, found = [], False
+        for rid in sorted(ids):
+            horses = scrape_good_horses(rid)
+            if horses:
+                found = True
+                lines.append(f"{int(rid[10:12])}R")
+                for h in horses:
+                    c = f"({h['comment']})" if h["comment"] else ""
+                    lines.append(f"  ⭐A {h['banum']}番 {h['name']} {c}")
+        if found:
+            a_blocks.append(f"【{pname}】\n" + "\n".join(lines))
+
     cond_blocks = []
-    for place_name, ids in place_groups.items():
-        lines = []
-        found = False
-        for race_id in sorted(ids):
-            race_num = int(race_id[10:12])
-            matched, cond_str = get_condition_matched_horses(race_id)
+    for pname, ids in place_groups.items():
+        lines, found = [], False
+        for rid in sorted(ids):
+            matched, cond_str = get_condition_matched_horses(rid)
             if matched:
                 found = True
-                lines.append(f"{race_num}R ({cond_str})")
+                lines.append(f"{int(rid[10:12])}R ({cond_str})")
                 for h in matched:
-                    banum_str = f"{h['banum']}番 " if h['banum'] else ""
-                    lines.append(f"  🔁 {banum_str}{h['name']} [{h['stat']}]")
+                    bstr = f"{h['banum']}番 " if h["banum"] else ""
+                    lines.append(f"  🔁 {bstr}{h['name']} [{h['stat']}]")
         if found:
-            cond_blocks.append(f"【{place_name}】\n" + "\n".join(lines))
+            cond_blocks.append(f"【{pname}】\n" + "\n".join(lines))
 
     sj_blocks = []
     if DB_ENABLED:
-        for place_name, ids in place_groups.items():
-            lines = []
-            found = False
-            for race_id in sorted(ids):
-                race_num = int(race_id[10:12])
-                horses = get_sire_jockey_info(race_id)
+        for pname, ids in place_groups.items():
+            lines, found = [], False
+            for rid in sorted(ids):
+                horses = get_sire_jockey_info(rid)
                 if horses:
                     found = True
-                    lines.append(f"{race_num}R")
+                    lines.append(f"{int(rid[10:12])}R")
                     for h in horses:
-                        banum_str = f"{h['banum']}番 " if h['banum'] else ""
-                        line = f"  🧬 {banum_str}{h['name']}"
-                        if h['sire'] and h['sire_stat']:
+                        bstr = f"{h['banum']}番 " if h["banum"] else ""
+                        line = f"  🧬 {bstr}{h['name']}"
+                        if h["sire"] and h["sire_stat"]:
                             line += f"\n     父:{h['sire']} [{h['sire_stat']}]"
-                        if h['bms'] and h['bms_stat']:
+                        if h["bms"] and h["bms_stat"]:
                             line += f"\n     母父:{h['bms']} [{h['bms_stat']}]"
-                        if h['jockey'] and h['jockey_stat']:
+                        if h["jockey"] and h["jockey_stat"]:
                             line += f"\n     騎手:{h['jockey']} [{h['jockey_stat']}]"
                         lines.append(line)
             if found:
-                sj_blocks.append(f"【{place_name}】\n" + "\n".join(lines))
+                sj_blocks.append(f"【{pname}】\n" + "\n".join(lines))
 
-    messages = []
-    messages += pack_messages(f"🏇 {date_display} 調教評価A", a_blocks) or [f"🏇 {date_display}\n本日はA評価の馬が見当たりませんでした。"]
-    messages += pack_messages(f"🔁 {date_display} 同条件で過去3着内あり", cond_blocks) or [f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。"]
-    messages += pack_messages(f"🧬 {date_display} 血統・騎手注目馬", sj_blocks)
-    return messages[:5]
+    msgs = []
+    msgs += pack(f"🏇 {date_display} 調教評価A", a_blocks) or [f"🏇 {date_display}\n本日はA評価の馬が見当たりませんでした。"]
+    msgs += pack(f"🔁 {date_display} 同条件で過去3着内あり", cond_blocks) or [f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。"]
+    msgs += pack(f"🧬 {date_display} 血統・騎手注目馬", sj_blocks)
+    return msgs[:5]
 
 def send_push_messages(user_id, date_str=None):
     try:
@@ -365,6 +336,72 @@ def send_push_messages(user_id, date_str=None):
         print(f"Push送信完了: {user_id}")
     except Exception as e:
         print(f"Push送信エラー: {e}")
+
+def build_weekend_summary():
+    """今週末の注目馬まとめをテキストで生成"""
+    jst = pytz.timezone("Asia/Tokyo")
+    now = datetime.now(jst)
+    weekday = now.weekday()
+    days_to_sat = (5 - weekday) % 7 or 7
+    days_to_sun = (6 - weekday) % 7 or 7
+    target_dates = []
+    for d in sorted(set([days_to_sat, days_to_sun])):
+        dt = now + timedelta(days=d)
+        target_dates.append(dt.strftime("%Y%m%d"))
+
+    all_race_ids = []
+    for date_str in target_dates:
+        all_race_ids.extend(get_today_race_ids(date_str))
+
+    if not all_race_ids:
+        return "📅 今週末のレース情報がまだ公開されていません。\n当日に「今日」と送ってください。"
+
+    place_ids = {}
+    for rid in all_race_ids:
+        pname = PLACE_MAP.get(rid[4:6], f"場{rid[4:6]}")
+        place_ids.setdefault(pname, []).append(rid)
+
+    date_labels = [f"{d[4:6]}/{d[6:]}" for d in target_dates]
+    lines = [f"📅 今週末の注目馬（{' ・ '.join(date_labels)}）",
+             f"開催: {' / '.join(place_ids.keys())}", ""]
+
+    total = 0
+    for place, ids in place_ids.items():
+        place_lines = []
+        for rid in sorted(ids):
+            race_num = int(rid[10:12])
+            sj = get_sire_jockey_info(rid) if DB_ENABLED else []
+            if sj:
+                place_lines.append(f"{race_num}R")
+                for h in sj[:3]:
+                    banum = f"{h['banum']}番 " if h["banum"] else ""
+                    place_lines.append(f"  {banum}{h['name']}")
+                    if h["sire"] and h["sire_stat"]:
+                        place_lines.append(f"  父:{h['sire']} [{h['sire_stat']}]")
+                    if h["jockey"] and h["jockey_stat"]:
+                        place_lines.append(f"  {h['jockey']} [{h['jockey_stat']}]")
+                    total += 1
+        if place_lines:
+            lines.append(f"【{place}】")
+            lines.extend(place_lines)
+            lines.append("")
+
+    if total == 0:
+        return "📅 今週末の注目馬データを収集中です。\n当日に「今日」と送ってください。"
+    lines.append(f"（2016年〜のDBデータより {total}頭抽出）")
+    return "\n".join(lines)
+
+def send_weekend_summary(user_id):
+    """今週末まとめをPush送信"""
+    try:
+        msg = build_weekend_summary()
+        parts = [msg[i:i+4800] for i in range(0, len(msg), 4800)]
+        with ApiClient(configuration) as api_client:
+            MessagingApi(api_client).push_message(
+                PushMessageRequest(to=user_id, messages=[TextMessage(text=p) for p in parts[:5]])
+            )
+    except Exception as e:
+        print(f"週末まとめ送信エラー: {e}")
 
 def get_next_race_date():
     jst = pytz.timezone("Asia/Tokyo")
@@ -382,32 +419,23 @@ def scheduled_daily_send():
         print("[Scheduler] 登録ユーザーなし")
         return
     for uid in user_ids:
-        t = threading.Thread(target=send_push_messages, args=(uid, next_date))
-        t.daemon = True
-        t.start()
+        threading.Thread(target=send_push_messages, args=(uid, next_date), daemon=True).start()
     print(f"[Scheduler] {len(user_ids)}人に送信開始 ({next_date})")
 
 def scheduled_weekly_batch():
     if not DB_ENABLED:
         return
-    t = threading.Thread(target=run_weekly_batch)
-    t.daemon = True
-    t.start()
-
-# =============================================
-# 長期履歴バッチ：過去10年分を自動収集
-# =============================================
+    threading.Thread(target=run_weekly_batch, daemon=True).start()
 
 def generate_sunday_list(start_year=2016, end_year=2026):
-    """start_yearからend_yearまでの全日曜日リストを生成（新しい順）"""
     sundays = []
     d = datetime(end_year, 12, 31)
     start = datetime(start_year, 1, 1)
     while d >= start:
-        if d.weekday() == 6:  # 日曜日
+        if d.weekday() == 6:
             sundays.append(d.strftime("%Y%m%d"))
         d -= timedelta(days=1)
-    return sundays  # 新しい順
+    return sundays
 
 def save_history_status(status):
     with open(HISTORY_STATUS_FILE, "w") as f:
@@ -421,49 +449,31 @@ def load_history_status():
         return {"running": False, "completed": [], "total": 0, "current": "", "started_at": ""}
 
 def run_full_history_batch(start_year=2016):
-    """過去10年分を全て処理（バックグラウンド実行）"""
     if not DB_ENABLED:
-        print("[HistoryBatch] DB無効 - スキップ")
         return
-
     all_sundays = generate_sunday_list(start_year=start_year)
     status = load_history_status()
     completed_set = set(status.get("completed", []))
-
-    # 未処理の週だけ対象
     remaining = [d for d in all_sundays if d not in completed_set]
     total = len(remaining)
-    print(f"[HistoryBatch] 開始: {total}週を処理（済み: {len(completed_set)}週）")
-
-    status = {
-        "running": True,
-        "completed": list(completed_set),
-        "total": len(all_sundays),
-        "remaining": total,
-        "current": "",
-        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    print(f"[HistoryBatch] 開始: {total}週を処理")
+    status = {"running": True, "completed": list(completed_set), "total": len(all_sundays),
+              "remaining": total, "current": "",
+              "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     save_history_status(status)
-
     for i, date_str in enumerate(remaining):
         try:
             status["current"] = date_str
             status["remaining"] = total - i
             status["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_history_status(status)
-
-            print(f"[HistoryBatch] {i+1}/{total} 処理中: {date_str}")
             run_weekly_batch(date_str)
-
             completed_set.add(date_str)
             status["completed"] = list(completed_set)
             save_history_status(status)
-
         except Exception as e:
             print(f"[HistoryBatch] {date_str} エラー: {e}")
-            continue
-
     status["running"] = False
     status["current"] = ""
     status["remaining"] = 0
@@ -471,7 +481,6 @@ def run_full_history_batch(start_year=2016):
     save_history_status(status)
     print(f"[HistoryBatch] 完了！ {len(completed_set)}週を処理")
 
-# スケジューラー
 scheduler = BackgroundScheduler(timezone=pytz.utc)
 scheduler.add_job(scheduled_daily_send, CronTrigger(hour=11, minute=0, timezone=pytz.utc), id="daily_send", replace_existing=True)
 scheduler.add_job(scheduled_weekly_batch, CronTrigger(day_of_week="sun", hour=13, minute=0, timezone=pytz.utc), id="weekly_batch", replace_existing=True)
@@ -499,6 +508,7 @@ def handle_message(event):
     user_id = event.source.user_id
     user_text = event.message.text.strip()
     save_user_id(user_id)
+
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message_with_http_info(
             ReplyMessageRequest(
@@ -506,17 +516,22 @@ def handle_message(event):
                 messages=[TextMessage(text="📊 データを収集中です...\n少々お待ちください（1〜2分）")]
             )
         )
+
     if any(kw in user_text for kw in ["今日", "きょう", "本日", "調教"]):
         threading.Thread(target=send_push_messages, args=(user_id,), daemon=True).start()
+    elif user_text in ["今週末", "今週", "週末"]:
+        threading.Thread(target=send_weekend_summary, args=(user_id,), daemon=True).start()
     elif re.match(r'^\d{8}$', user_text):
         threading.Thread(target=send_push_messages, args=(user_id, user_text), daemon=True).start()
-    elif user_text in ["ヘルプ", "help", "使い方"]:
+    elif user_text in ["ヘルプ", "help", "使い方", "?"]:
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).push_message(
                 PushMessageRequest(to=user_id, messages=[TextMessage(text=(
-                    "🏇 使い方\n\n「今日」と送ると:\n"
-                    "⭐ 調教評価Aの馬\n🔁 同条件で過去3着内の馬\n🧬 血統・騎手注目馬\n"
-                    "を表示します。\n\n📅 開催前日20時に自動送信されます。"
+                    "🏇 使えるコマンド\n\n"
+                    "「今日」→ 当日の調教評価・過去成績・血統騎手\n"
+                    "「今週末」→ 週末の注目馬まとめ\n"
+                    "「20260322」→ 日付指定\n\n"
+                    "📅 開催前日20時に自動送信されます"
                 ))])
             )
 
@@ -525,14 +540,12 @@ def health():
     jst = pytz.timezone("Asia/Tokyo")
     now = datetime.now(jst).strftime("%Y/%m/%d %H:%M JST")
     user_count = len(load_user_ids())
-    db_status = "有効" if DB_ENABLED else "無効"
+    db_status = "有効" if DB_ENABLED else "無効（DATABASE_URL未設定）"
     hist = load_history_status()
     hist_info = ""
     if hist.get("running"):
         done = len(hist.get("completed", []))
-        total = hist.get("total", 0)
-        current = hist.get("current", "")
-        hist_info = f"\n📚 履歴収集中: {done}/{total}週 (現在:{current})"
+        hist_info = f"\n📚 履歴収集中: {done}/{hist.get('total',0)}週 (現在:{hist.get('current','')})"
     elif hist.get("completed"):
         hist_info = f"\n📚 履歴収集済み: {len(hist['completed'])}週"
     return f"🏇 Keiba LINE Bot [{now}]\n登録ユーザー: {user_count}人\nDB: {db_status}{hist_info}"
@@ -547,43 +560,29 @@ def batch_run():
 
 @app.route("/batch/history", methods=["GET"])
 def batch_history():
-    """過去10年分の全データを収集するエンドポイント"""
     if not DB_ENABLED:
         return "DB未設定", 400
     hist = load_history_status()
     if hist.get("running"):
         done = len(hist.get("completed", []))
-        total = hist.get("total", 0)
-        current = hist.get("current", "")
-        return f"📚 履歴収集は既に実行中です\n進捗: {done}/{total}週\n現在処理中: {current}", 200
+        return f"📚 履歴収集は既に実行中です\n進捗: {done}/{hist.get('total',0)}週\n現在: {hist.get('current','')}", 200
     start_year = int(request.args.get("from", 2016))
     threading.Thread(target=run_full_history_batch, args=(start_year,), daemon=True).start()
     all_weeks = len(generate_sunday_list(start_year=start_year))
-    return f"📚 履歴収集バッチ開始！\n対象: {start_year}年〜現在 ({all_weeks}週)\nバックグラウンドで処理中です。\n/batch/status で進捗確認できます。", 200
+    return f"📚 履歴収集バッチ開始！\n対象: {start_year}年〜現在 ({all_weeks}週)\n/batch/status で進捗確認できます。", 200
 
 @app.route("/batch/status", methods=["GET"])
 def batch_status():
-    """バッチ処理の進捗状況を確認"""
     hist = load_history_status()
     if not hist.get("started_at"):
         return "📭 履歴収集バッチはまだ実行されていません。\n/batch/history で開始できます。", 200
     done = len(hist.get("completed", []))
     total = hist.get("total", 0)
-    remaining = hist.get("remaining", 0)
-    current = hist.get("current", "-")
-    running = hist.get("running", False)
-    started = hist.get("started_at", "")
-    updated = hist.get("last_updated", "")
     pct = f"{done/total*100:.1f}" if total > 0 else "0"
-    status_icon = "🔄" if running else "✅"
-    return (
-        f"{status_icon} 履歴収集バッチ\n"
-        f"進捗: {done}/{total}週 ({pct}%)\n"
-        f"残り: {remaining}週\n"
-        f"現在: {current}\n"
-        f"開始: {started}\n"
-        f"更新: {updated}"
-    ), 200
+    icon = "🔄" if hist.get("running") else "✅"
+    return (f"{icon} 履歴収集バッチ\n進捗: {done}/{total}週 ({pct}%)\n"
+            f"残り: {hist.get('remaining',0)}週\n現在: {hist.get('current','-')}\n"
+            f"開始: {hist.get('started_at','')}\n更新: {hist.get('last_updated','')}"), 200
 
 @app.route("/send_now", methods=["GET"])
 def send_now():
@@ -600,19 +599,19 @@ def debug(race_id):
         matched, cond_str = get_condition_matched_horses(race_id)
         result += f"\n同条件({cond_str})で過去3着内 ({len(matched)}頭)\n"
         for h in matched:
-            banum_str = f"{h['banum']}番 " if h['banum'] else ""
-            result += f"  🔁 {banum_str}{h['name']} [{h['stat']}]\n"
+            bstr = f"{h['banum']}番 " if h["banum"] else ""
+            result += f"  🔁 {bstr}{h['name']} [{h['stat']}]\n"
         if DB_ENABLED:
             sj = get_sire_jockey_info(race_id)
             result += f"\n血統・騎手注目馬 ({len(sj)}頭)\n"
             for h in sj:
-                banum_str = f"{h['banum']}番 " if h['banum'] else ""
-                result += f"  🧬 {banum_str}{h['name']}\n"
-                if h['sire_stat']:
+                bstr = f"{h['banum']}番 " if h["banum"] else ""
+                result += f"  🧬 {bstr}{h['name']}\n"
+                if h["sire_stat"]:
                     result += f"     父:{h['sire']} [{h['sire_stat']}]\n"
-                if h['bms_stat']:
+                if h["bms_stat"]:
                     result += f"     母父:{h['bms']} [{h['bms_stat']}]\n"
-                if h['jockey_stat']:
+                if h["jockey_stat"]:
                     result += f"     騎手:{h['jockey']} [{h['jockey_stat']}]\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
