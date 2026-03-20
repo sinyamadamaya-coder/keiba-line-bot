@@ -120,7 +120,11 @@ def get_race_condition(race_id):
         print(f"レース条件取得エラー {race_id}: {e}")
         return None
 
-def get_horse_links(race_id):
+def get_horse_list(race_id):
+    """
+    出馬表から出走馬一覧を取得
+    戻り値: [{"banum", "name", "horse_id", "result_url"}]
+    """
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
@@ -140,16 +144,21 @@ def get_horse_links(race_id):
                 horse_id = m.group(1)
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
-                    horses.append({"banum": banum, "name": name, "horse_id": horse_id,
-                                   "result_url": f"https://db.netkeiba.com/horse/result/{horse_id}/"})
+                    horses.append({
+                        "banum": banum,
+                        "name": name,
+                        "horse_id": horse_id,
+                        "result_url": f"https://db.netkeiba.com/horse/result/{horse_id}/"
+                    })
         return horses
     except Exception as e:
         print(f"馬リスト取得エラー: {e}")
         return []
 
-def get_condition_stats(horse_result_url, target_place, target_surface, target_distance):
+def get_condition_stats(result_url, target_place, target_surface, target_distance):
+    """馬の過去成績ページから同条件の成績を取得"""
     try:
-        soup = fetch_soup(horse_result_url, encoding="euc-jp")
+        soup = fetch_soup(result_url, encoding="euc-jp")
         table = soup.find("table", class_="db_h_race_results")
         if not table:
             return False, ""
@@ -181,12 +190,13 @@ def get_condition_stats(horse_result_url, target_place, target_surface, target_d
         return False, ""
 
 def get_condition_matched_horses(race_id):
+    """同条件で過去3着以内に入った馬を返す"""
     condition = get_race_condition(race_id)
     if not condition:
         return [], ""
     tp, ts, td = condition["place"], condition["surface"], condition["distance"]
     condition_str = f"{tp}・{ts}{td}m"
-    horses = get_horse_links(race_id)
+    horses = get_horse_list(race_id)
     matched = []
     for horse in horses:
         hit, stat = get_condition_stats(horse["result_url"], tp, ts, td)
@@ -194,14 +204,12 @@ def get_condition_matched_horses(race_id):
             matched.append({"banum": horse["banum"], "name": horse["name"], "stat": stat})
     return matched, condition_str
 
-def get_horse_sire_info(horse_id):
+def get_sire_bms(horse_id):
     """
     db.netkeiba.com/horse/{id}/ の blood_table から父馬・母父馬を取得
     blood_table 構造:
-      row0 col0(rowspan=2): 父馬
-      row0 col1: 父父馬
-      row2 col0(rowspan=2): 母
-      row2 col1: 母父馬（= ブルードメアサイアー）
+      row0 col0 (rowspan=2): 父馬
+      row2 col1: 母父馬（ブルードメアサイアー）
     """
     try:
         url = f"https://db.netkeiba.com/horse/{horse_id}/"
@@ -210,13 +218,8 @@ def get_horse_sire_info(horse_id):
         if not bt:
             return "", ""
         rows = bt.find_all("tr")
-        sire, bms = "", ""
-        # 父馬: row0の最初のセル（rowspan=2）
-        if rows:
-            first_cells = rows[0].find_all("td")
-            if first_cells:
-                sire = first_cells[0].get_text(strip=True)
-        # 母父馬: row2の2番目のセル
+        sire = rows[0].find_all("td")[0].get_text(strip=True) if rows else ""
+        bms = ""
         if len(rows) >= 3:
             row2_cells = rows[2].find_all("td")
             if len(row2_cells) >= 2:
@@ -227,7 +230,9 @@ def get_horse_sire_info(horse_id):
         return "", ""
 
 def get_sire_jockey_info(race_id):
-    """出走馬ごとに血統（父・母父）と騎手をDBと照合して注目馬を返す"""
+    """
+    各馬の血統（父・母父）と騎手をDBと照合して注目馬を返す
+    """
     if not DB_ENABLED:
         return []
     condition = get_race_condition(race_id)
@@ -236,46 +241,38 @@ def get_sire_jockey_info(race_id):
     surface = condition["surface"]
     distance = condition["distance"]
     place = condition["place"]
-    horses = get_horse_links(race_id)
+    horses = get_horse_list(race_id)
     if not horses:
         return []
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
-        # 騎手情報を出馬表から取得（馬名と騎手のマッピング）
         soup = fetch_soup(url)
         jockey_map = {}
         for row in soup.find_all("tr", class_="HorseList"):
             name_link = row.find("a", href=re.compile(r"db\.netkeiba\.com/horse/\d+"))
             if not name_link:
                 continue
-            horse_name = name_link.get_text(strip=True)
             jockey_td = row.find("td", class_="Jockey")
             jockey = jockey_td.get_text(strip=True) if jockey_td else ""
-            jockey_map[horse_name] = jockey
+            jockey_map[name_link.get_text(strip=True)] = jockey
     except Exception as e:
         print(f"騎手情報取得エラー: {e}")
         jockey_map = {}
-
     results = []
     for horse in horses:
-        horse_id = horse["horse_id"]
-        horse_name = horse["name"]
-        jockey = jockey_map.get(horse_name, "")
-        # 血統取得（/horse/{id}/ページから）
-        sire, bms = get_horse_sire_info(horse_id)
-        # DB照合
+        jockey = jockey_map.get(horse["name"], "")
+        sire, bms = get_sire_bms(horse["horse_id"])
         sire_stat = stats_to_str(get_sire_stats(sire, 1, surface, int(distance), place)) if sire else None
         bms_stat = stats_to_str(get_sire_stats(bms, 2, surface, int(distance), place)) if bms else None
         jockey_stat = stats_to_str(get_jockey_stats(jockey, surface, int(distance), place)) if jockey else None
         if sire_stat or bms_stat or jockey_stat:
             results.append({
-                "banum": horse["banum"], "name": horse_name,
+                "banum": horse["banum"], "name": horse["name"],
                 "sire": sire, "sire_stat": sire_stat,
                 "bms": bms, "bms_stat": bms_stat,
                 "jockey": jockey, "jockey_stat": jockey_stat,
             })
     return results
-
 def build_line_messages(date_str=None):
     if not date_str:
         date_str = datetime.now().strftime("%Y%m%d")
@@ -375,23 +372,18 @@ def build_weekend_summary():
     target_dates = []
     for d in sorted(set([days_to_sat, days_to_sun])):
         target_dates.append((now + timedelta(days=d)).strftime("%Y%m%d"))
-
     all_race_ids = []
     for ds in target_dates:
         all_race_ids.extend(get_today_race_ids(ds))
-
     if not all_race_ids:
         return "📅 今週末のレース情報がまだ公開されていません。\n当日に「今日」と送ってください。"
-
     place_ids = {}
     for rid in all_race_ids:
         pname = PLACE_MAP.get(rid[4:6], f"場{rid[4:6]}")
         place_ids.setdefault(pname, []).append(rid)
-
     date_labels = [f"{d[4:6]}/{d[6:]}" for d in target_dates]
     lines = [f"📅 今週末の注目馬（{' ・ '.join(date_labels)}）",
              f"開催: {' / '.join(place_ids.keys())}", ""]
-
     total = 0
     for place, ids in place_ids.items():
         place_lines = []
@@ -411,7 +403,6 @@ def build_weekend_summary():
             lines.append(f"【{place}】")
             lines.extend(place_lines)
             lines.append("")
-
     if total == 0:
         return "📅 今週末の注目馬データを収集中です。\n当日に「今日」と送ってください。"
     lines.append(f"（2016年〜のDBデータより {total}頭抽出）")
@@ -427,7 +418,6 @@ def send_weekend_summary(user_id):
             )
     except Exception as e:
         print(f"週末まとめ送信エラー: {e}")
-
 def get_next_race_date():
     jst = pytz.timezone("Asia/Tokyo")
     tomorrow = (datetime.now(jst) + timedelta(days=1)).strftime("%Y%m%d")
@@ -454,19 +444,16 @@ def scheduled_weekly_batch():
 def generate_sunday_list(start_year=2016, end_year=2026):
     sundays, d, start = [], datetime(end_year, 12, 31), datetime(start_year, 1, 1)
     while d >= start:
-        if d.weekday() == 6:
-            sundays.append(d.strftime("%Y%m%d"))
+        if d.weekday() == 6: sundays.append(d.strftime("%Y%m%d"))
         d -= timedelta(days=1)
     return sundays
 
 def save_history_status(status):
-    with open(HISTORY_STATUS_FILE, "w") as f:
-        json.dump(status, f)
+    with open(HISTORY_STATUS_FILE, "w") as f: json.dump(status, f)
 
 def load_history_status():
     try:
-        with open(HISTORY_STATUS_FILE, "r") as f:
-            return json.load(f)
+        with open(HISTORY_STATUS_FILE, "r") as f: return json.load(f)
     except:
         return {"running": False, "completed": [], "total": 0, "current": "", "started_at": ""}
 
@@ -506,19 +493,15 @@ scheduler.add_job(scheduled_weekly_batch, CronTrigger(day_of_week="sun", hour=13
 scheduler.start()
 print(f"[Scheduler] 起動完了 / DB: {'有効' if DB_ENABLED else '無効'}")
 if DB_ENABLED:
-    try:
-        init_db()
-    except Exception as e:
-        print(f"[DB] 初期化エラー: {e}")
+    try: init_db()
+    except Exception as e: print(f"[DB] 初期化エラー: {e}")
 
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
+    try: handler.handle(body, signature)
+    except InvalidSignatureError: abort(400)
     return "OK"
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -559,7 +542,7 @@ def health():
     hist_info = ""
     if hist.get("running"):
         done = len(hist.get("completed", []))
-        hist_info = f"\n📚 履歴収集中: {done}/{hist.get('total',0)}週 (現在:{hist.get('current','')})"
+        hist_info = f"\n📚 履歴収集中: {done}/{hist.get('total',0)}週 (現在:{hist.get('current','')})" 
     elif hist.get("completed"):
         hist_info = f"\n📚 履歴収集済み: {len(hist['completed'])}週"
     return f"🏇 Keiba LINE Bot [{now}]\n登録ユーザー: {user_count}人\nDB: {db_status}{hist_info}"
@@ -623,7 +606,8 @@ def debug(race_id):
                 if h["jockey_stat"]: result += f"     騎手:{h['jockey']} [{h['jockey_stat']}]\n"
         return result, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as e:
-        return f"Error: {e}", 500
+        import traceback
+        return f"Error: {e}\n{traceback.format_exc()}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
