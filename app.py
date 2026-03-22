@@ -121,10 +121,6 @@ def get_race_condition(race_id):
         return None
 
 def get_horse_list(race_id):
-    """
-    出馬表から出走馬一覧を取得
-    戻り値: [{"banum", "name", "horse_id", "result_url"}]
-    """
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     try:
         soup = fetch_soup(url)
@@ -145,8 +141,7 @@ def get_horse_list(race_id):
                 if horse_id not in seen_ids:
                     seen_ids.add(horse_id)
                     horses.append({
-                        "banum": banum,
-                        "name": name,
+                        "banum": banum, "name": name,
                         "horse_id": horse_id,
                         "result_url": f"https://db.netkeiba.com/horse/result/{horse_id}/"
                     })
@@ -156,7 +151,6 @@ def get_horse_list(race_id):
         return []
 
 def get_condition_stats(result_url, target_place, target_surface, target_distance):
-    """馬の過去成績ページから同条件の成績を取得"""
     try:
         soup = fetch_soup(result_url, encoding="euc-jp")
         table = soup.find("table", class_="db_h_race_results")
@@ -190,7 +184,6 @@ def get_condition_stats(result_url, target_place, target_surface, target_distanc
         return False, ""
 
 def get_condition_matched_horses(race_id):
-    """同条件で過去3着以内に入った馬を返す"""
     condition = get_race_condition(race_id)
     if not condition:
         return [], ""
@@ -205,12 +198,7 @@ def get_condition_matched_horses(race_id):
     return matched, condition_str
 
 def get_sire_bms(horse_id):
-    """
-    db.netkeiba.com/horse/{id}/ の blood_table から父馬・母父馬を取得
-    blood_table 構造:
-      row0 col0 (rowspan=2): 父馬
-      row2 col1: 母父馬（ブルードメアサイアー）
-    """
+    """db.netkeiba.com/horse/{id}/ の blood_table から父馬・母父馬を取得"""
     try:
         url = f"https://db.netkeiba.com/horse/{horse_id}/"
         soup = fetch_soup(url, encoding="euc-jp")
@@ -230,9 +218,7 @@ def get_sire_bms(horse_id):
         return "", ""
 
 def get_sire_jockey_info(race_id):
-    """
-    各馬の血統（父・母父）と騎手をDBと照合して注目馬を返す
-    """
+    """各馬の血統（父・母父）と騎手をDBと照合して注目馬を返す"""
     if not DB_ENABLED:
         return []
     condition = get_race_condition(race_id)
@@ -280,6 +266,10 @@ def build_line_messages(date_str=None):
     race_ids = get_today_race_ids(date_str)
     if not race_ids:
         return [f"📭 {date_display} のレース情報が見つかりませんでした。"]
+    # 7R〜12Rのみに絞り込む
+    race_ids = [rid for rid in race_ids if 7 <= int(rid[10:12]) <= 12]
+    if not race_ids:
+        return [f"📭 {date_display} 7R〜12Rのレース情報が見つかりませんでした。"]
     place_groups = {}
     for rid in race_ids:
         pname = PLACE_MAP.get(rid[4:6], f"場{rid[4:6]}")
@@ -347,9 +337,9 @@ def build_line_messages(date_str=None):
                 sj_blocks.append(f"【{pname}】\n" + "\n".join(lines))
 
     msgs = []
-    msgs += pack(f"🏇 {date_display} 調教評価A", a_blocks) or [f"🏇 {date_display}\n本日はA評価の馬が見当たりませんでした。"]
-    msgs += pack(f"🔁 {date_display} 同条件で過去3着内あり", cond_blocks) or [f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。"]
-    msgs += pack(f"🧬 {date_display} 血統・騎手注目馬", sj_blocks)
+    msgs += pack(f"🏇 {date_display} 調教評価A（7〜12R）", a_blocks) or [f"🏇 {date_display}\nA評価の馬が見当たりませんでした。"]
+    msgs += pack(f"🔁 {date_display} 同条件で過去3着内あり（7〜12R）", cond_blocks) or [f"🔁 {date_display}\n同条件で過去3着内の馬は見当たりませんでした。"]
+    msgs += pack(f"🧬 {date_display} 血統・騎手注目馬（7〜12R）", sj_blocks)
     return msgs[:5]
 
 def send_push_messages(user_id, date_str=None):
@@ -377,12 +367,14 @@ def build_weekend_summary():
         all_race_ids.extend(get_today_race_ids(ds))
     if not all_race_ids:
         return "📅 今週末のレース情報がまだ公開されていません。\n当日に「今日」と送ってください。"
+    # 7R〜12Rのみに絞り込む
+    all_race_ids = [rid for rid in all_race_ids if 7 <= int(rid[10:12]) <= 12]
     place_ids = {}
     for rid in all_race_ids:
         pname = PLACE_MAP.get(rid[4:6], f"場{rid[4:6]}")
         place_ids.setdefault(pname, []).append(rid)
     date_labels = [f"{d[4:6]}/{d[6:]}" for d in target_dates]
-    lines = [f"📅 今週末の注目馬（{' ・ '.join(date_labels)}）",
+    lines = [f"📅 今週末の注目馬（{' ・ '.join(date_labels)} / 7〜12R）",
              f"開催: {' / '.join(place_ids.keys())}", ""]
     total = 0
     for place, ids in place_ids.items():
@@ -525,8 +517,8 @@ def handle_message(event):
             MessagingApi(api_client).push_message(
                 PushMessageRequest(to=user_id, messages=[TextMessage(text=(
                     "🏇 使えるコマンド\n\n"
-                    "「今日」→ 当日の調教評価・過去成績・血統騎手\n"
-                    "「今週末」→ 週末の注目馬まとめ\n"
+                    "「今日」→ 7〜12Rの調教評価・過去成績・血統騎手\n"
+                    "「今週末」→ 週末7〜12Rの注目馬まとめ\n"
                     "「20260322」→ 日付指定\n\n"
                     "📅 開催前日20時に自動送信されます"
                 ))])
@@ -542,7 +534,7 @@ def health():
     hist_info = ""
     if hist.get("running"):
         done = len(hist.get("completed", []))
-        hist_info = f"\n📚 履歴収集中: {done}/{hist.get('total',0)}週 (現在:{hist.get('current','')})" 
+        hist_info = f"\n📚 履歴収集中: {done}/{hist.get('total',0)}週"
     elif hist.get("completed"):
         hist_info = f"\n📚 履歴収集済み: {len(hist['completed'])}週"
     return f"🏇 Keiba LINE Bot [{now}]\n登録ユーザー: {user_count}人\nDB: {db_status}{hist_info}"
@@ -560,16 +552,16 @@ def batch_history():
     hist = load_history_status()
     if hist.get("running"):
         done = len(hist.get("completed", []))
-        return f"📚 履歴収集は既に実行中です\n進捗: {done}/{hist.get('total',0)}週\n現在: {hist.get('current','')}", 200
+        return f"📚 履歴収集は既に実行中です\n進捗: {done}/{hist.get('total',0)}週", 200
     start_year = int(request.args.get("from", 2016))
     threading.Thread(target=run_full_history_batch, args=(start_year,), daemon=True).start()
-    return f"📚 履歴収集バッチ開始！\n対象: {start_year}年〜現在 ({len(generate_sunday_list(start_year=start_year))}週)\n/batch/status で進捗確認できます。", 200
+    return f"📚 履歴収集バッチ開始！\n対象: {start_year}年〜現在 ({len(generate_sunday_list(start_year=start_year))}週)", 200
 
 @app.route("/batch/status", methods=["GET"])
 def batch_status():
     hist = load_history_status()
     if not hist.get("started_at"):
-        return "📭 履歴収集バッチはまだ実行されていません。\n/batch/history で開始できます。", 200
+        return "📭 履歴収集バッチはまだ実行されていません。", 200
     done = len(hist.get("completed", []))
     total = hist.get("total", 0)
     pct = f"{done/total*100:.1f}" if total > 0 else "0"
